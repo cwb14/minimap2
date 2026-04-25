@@ -2357,7 +2357,6 @@ function paf_sim2bed(args)
 	}
 	var buf = new Bytes();
 	var file = new File(args[0]);
-	var seen = {};
 	while (file.readline(buf) >= 0) {
 		var line = buf.toString();
 		var t = line.split("!");
@@ -2378,8 +2377,6 @@ function paf_sim2bed(args)
 			strand = t[4];
 		}
 		if (st > en) { var tmp = st; st = en; en = tmp; }
-		if (seen[line]) continue;
-		seen[line] = 1;
 		print([chr, st, en, line, 0, strand].join("\t"));
 	}
 	file.close();
