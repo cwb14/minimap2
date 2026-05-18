@@ -184,7 +184,7 @@ int mm_idx_getseq_rev(const mm_idx_t *mi, uint32_t rid, uint32_t st, uint32_t en
 	en1 = s->offset + (s->len - st);
 	for (i = st1; i < en1; ++i) {
 		uint8_t c = mm_seq4_get(mi->S, i);
-		seq[en1 - i - 1] = c < 4? 3 - c : c;
+		seq[en1 - i - 1] = mm_comp_table[c]; // IUPAC-aware reverse complement
 	}
 	return en - st;
 }

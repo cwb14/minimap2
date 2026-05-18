@@ -139,30 +139,41 @@ int mm_write_sam_hdr(const mm_idx_t *idx, const char *rg, const char *ver, int a
 	return ret;
 }
 
+// Mirror align.c's match/mismatch classification so the cs/MD tags stay
+// consistent with NM/de: pure ACGT and N/unknown keep the exact upstream
+// equality test (byte-identical output for non-IUPAC data); a real IUPAC
+// code (5..14) is a substitution only if the base sets are incompatible.
+static inline int mm_fmt_is_sub(int ct, int cq)
+{
+	if (ct == 4 || ct == 15 || cq == 4 || cq == 15) return cq != ct;
+	if (ct < 4 && cq < 4) return cq != ct;
+	return !mm_iupac_compat(ct, cq);
+}
+
 static void write_indel_ds(kstring_t *str, int64_t len, const uint8_t *seq, int64_t ll, int64_t lr) // write an indel to ds; adapted from minigraph
 {
 	int64_t i;
 	if (ll + lr >= len) {
 		mm_sprintf_lite(str, "[");
 		for (i = 0; i < len; ++i)
-			mm_sprintf_lite(str, "%c", "acgtn"[seq[i]]);
+			mm_sprintf_lite(str, "%c", mm_seq_nt16_str_lc[seq[i]]);
 		mm_sprintf_lite(str, "]");
 	} else {
 		int64_t k = 0;
 		if (ll > 0) {
 			mm_sprintf_lite(str, "[");
 			for (i = 0; i < ll; ++i)
-				mm_sprintf_lite(str, "%c", "acgtn"[seq[k+i]]);
+				mm_sprintf_lite(str, "%c", mm_seq_nt16_str_lc[seq[k+i]]);
 			mm_sprintf_lite(str, "]");
 			k += ll;
 		}
 		for (i = 0; i < len - lr - ll; ++i)
-			mm_sprintf_lite(str, "%c", "acgtn"[seq[k+i]]);
+			mm_sprintf_lite(str, "%c", mm_seq_nt16_str_lc[seq[k+i]]);
 		k += len - lr - ll;
 		if (lr > 0) {
 			mm_sprintf_lite(str, "[");
 			for (i = 0; i < lr; ++i)
-				mm_sprintf_lite(str, "%c", "acgtn"[seq[k+i]]);
+				mm_sprintf_lite(str, "%c", mm_seq_nt16_str_lc[seq[k+i]]);
 			mm_sprintf_lite(str, "]");
 		}
 	}
@@ -187,7 +198,7 @@ static void write_cs_ds_core(kstring_t *s, const uint8_t *tseq, const uint8_t *q
 		if (op == MM_CIGAR_MATCH || op == MM_CIGAR_EQ_MATCH || op == MM_CIGAR_X_MISMATCH) {
 			int l_tmp = 0;
 			for (j = 0; j < len; ++j) {
-				if (qseq[q_off + j] != tseq[t_off + j]) {
+				if (mm_fmt_is_sub(tseq[t_off + j], qseq[q_off + j])) {
 					if (l_tmp > 0) {
 						if (!no_iden) {
 							tmp[l_tmp] = 0;
@@ -195,8 +206,8 @@ static void write_cs_ds_core(kstring_t *s, const uint8_t *tseq, const uint8_t *q
 						} else mm_sprintf_lite(s, ":%d", l_tmp);
 						l_tmp = 0;
 					}
-					mm_sprintf_lite(s, "*%c%c", "acgtn"[tseq[t_off + j]], "acgtn"[qseq[q_off + j]]);
-				} else tmp[l_tmp++] = "ACGTN"[qseq[q_off + j]];
+					mm_sprintf_lite(s, "*%c%c", mm_seq_nt16_str_lc[tseq[t_off + j]], mm_seq_nt16_str_lc[qseq[q_off + j]]);
+				} else tmp[l_tmp++] = mm_seq_nt16_str[qseq[q_off + j]];
 			}
 			if (l_tmp > 0) {
 				if (!no_iden) {
@@ -220,7 +231,7 @@ static void write_cs_ds_core(kstring_t *s, const uint8_t *tseq, const uint8_t *q
 				write_indel_ds(s, len, &qseq[y], ll, lr);
 			} else {
 				for (j = 0, tmp[len] = 0; j < len; ++j)
-					tmp[j] = "acgtn"[qseq[q_off + j]];
+					tmp[j] = mm_seq_nt16_str_lc[qseq[q_off + j]];
 				mm_sprintf_lite(s, "+%s", tmp);
 			}
 			q_off += len;
@@ -239,14 +250,14 @@ static void write_cs_ds_core(kstring_t *s, const uint8_t *tseq, const uint8_t *q
 				write_indel_ds(s, len, &tseq[x], ll, lr);
 			} else {
 				for (j = 0, tmp[len] = 0; j < len; ++j)
-					tmp[j] = "acgtn"[tseq[t_off + j]];
+					tmp[j] = mm_seq_nt16_str_lc[tseq[t_off + j]];
 				mm_sprintf_lite(s, "-%s", tmp);
 			}
 			t_off += len;
 		} else { // intron
 			assert(len >= 2);
-			mm_sprintf_lite(s, "~%c%c%d%c%c", "acgtn"[tseq[t_off]], "acgtn"[tseq[t_off+1]],
-				len, "acgtn"[tseq[t_off+len-2]], "acgtn"[tseq[t_off+len-1]]);
+			mm_sprintf_lite(s, "~%c%c%d%c%c", mm_seq_nt16_str_lc[tseq[t_off]], mm_seq_nt16_str_lc[tseq[t_off+1]],
+				len, mm_seq_nt16_str_lc[tseq[t_off+len-2]], mm_seq_nt16_str_lc[tseq[t_off+len-1]]);
 			t_off += len;
 		}
 	}
@@ -255,8 +266,8 @@ static void write_cs_ds_core(kstring_t *s, const uint8_t *tseq, const uint8_t *q
 
 static inline void revcomp_splice(uint8_t s[2])
 {
-	uint8_t c = s[1] < 4? 3 - s[1] : 4;
-	s[1] = s[0] < 4? 3 - s[0] : 4;
+	uint8_t c = mm_comp_table[s[1]];
+	s[1] = mm_comp_table[s[0]];
 	s[0] = c;
 }
 
@@ -284,7 +295,7 @@ void mm_write_junc(kstring_t *s, const mm_idx_t *mi, const mm_bseq1_t *t, const 
 				revcomp_splice(donor);
 				revcomp_splice(acceptor);
 			}
-			//fprintf(stderr, "%c%c-%c%c\n", "ACGTN"[donor[0]], "ACGTN"[donor[1]], "ACGTN"[acceptor[0]], "ACGTN"[acceptor[1]]);
+			//fprintf(stderr, "%c%c-%c%c\n", mm_seq_nt16_str[donor[0]], mm_seq_nt16_str[donor[1]], mm_seq_nt16_str[acceptor[0]], mm_seq_nt16_str[acceptor[1]]);
 			if (donor[0] == 2 && donor[1] == 3) score1 = 3;
 			else if (donor[0] == 2 && donor[1] == 1) score1 = 2;
 			else if (donor[0] == 0 && donor[1] == 3) score1 = 1;
@@ -308,8 +319,8 @@ static void write_MD_core(kstring_t *s, const uint8_t *tseq, const uint8_t *qseq
 		assert((op >= MM_CIGAR_MATCH && op <= MM_CIGAR_N_SKIP) || op == MM_CIGAR_EQ_MATCH || op == MM_CIGAR_X_MISMATCH);
 		if (op == MM_CIGAR_MATCH || op == MM_CIGAR_EQ_MATCH || op == MM_CIGAR_X_MISMATCH) {
 			for (j = 0; j < len; ++j) {
-				if (qseq[q_off + j] != tseq[t_off + j]) {
-					mm_sprintf_lite(s, "%d%c", l_MD, "ACGTN"[tseq[t_off + j]]);
+				if (mm_fmt_is_sub(tseq[t_off + j], qseq[q_off + j])) {
+					mm_sprintf_lite(s, "%d%c", l_MD, mm_seq_nt16_str[tseq[t_off + j]]);
 					l_MD = 0;
 				} else ++l_MD;
 			}
@@ -318,7 +329,7 @@ static void write_MD_core(kstring_t *s, const uint8_t *tseq, const uint8_t *qseq
 			q_off += len;
 		} else if (op == MM_CIGAR_DEL) {
 			for (j = 0, tmp[len] = 0; j < len; ++j)
-				tmp[j] = "ACGTN"[tseq[t_off + j]];
+				tmp[j] = mm_seq_nt16_str[tseq[t_off + j]];
 			mm_sprintf_lite(s, "%d^%s", l_MD, tmp);
 			l_MD = 0;
 			t_off += len;
@@ -352,7 +363,7 @@ static void write_cs_ds_or_MD(void *km, kstring_t *s, const mm_idx_t *mi, const 
 		} else {
 			for (i = r->qs; i < r->qe; ++i) {
 				uint8_t c = seq_nt4_table[(uint8_t)t->seq[i]];
-				qseq[r->qe - i - 1] = c >= 4? 4 : 3 - c;
+				qseq[r->qe - i - 1] = mm_comp_table[c];
 			}
 		}
 	}

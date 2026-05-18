@@ -8,31 +8,52 @@
 
 #define MM_MAX_QLEN_FLANK 100
 
-static void ksw_gen_simple_mat(int m, int8_t *mat, int8_t a, int8_t b, int8_t sc_ambi)
+// IUPAC-aware alphabet size (forked). Symbols 0..15; see sketch.c / mmpriv.h.
+#define MM_ASIZE 16
+
+// Score between two *concrete* bases i,j in {0=A,1=C,2=G,3=T}.
+//   match -> +|a|;  transition (A<->G, C<->T) -> transition;  else -> -|b|
+// Reproduces upstream ksw_gen_ts_mat exactly on the pure-base block, including
+// the upstream rule that transition is ignored when it is 0 or equal to b.
+static inline int mm_base_sc(int i, int j, int a, int b, int tr)
 {
-	int i, j;
-	a = a < 0? -a : a;
-	b = b > 0? -b : b;
-	sc_ambi = sc_ambi > 0? -sc_ambi : sc_ambi;
-	for (i = 0; i < m - 1; ++i) {
-		for (j = 0; j < m - 1; ++j)
-			mat[i * m + j] = i == j? a : b;
-		mat[i * m + m - 1] = sc_ambi;
-	}
-	for (j = 0; j < m; ++j)
-		mat[(m - 1) * m + j] = sc_ambi;
+	if (i == j) return a;
+	if (tr != 0 && (((i==0&&j==2)||(i==2&&j==0)) || ((i==1&&j==3)||(i==3&&j==1))))
+		return tr;
+	return b;
 }
 
-static void ksw_gen_ts_mat(int m, int8_t *mat, int8_t a, int8_t b, int8_t transition, int8_t sc_ambi)
+// IUPAC-aware substitution matrix (MM_ASIZE x MM_ASIZE).
+// Score(x,y) = expected base score, i.e. the mean of mm_base_sc over every
+// concrete base i in set(x) and j in set(y) (uniform degeneracy model),
+// rounded half away from zero. mat[0]=(A,A)=|a| is preserved as the global
+// max so ksw2's sc_mch_=mat[0] / score-range assumptions still hold.
+// `sc_ambi` (--score-N) no longer flat-penalises ambiguity here: N (={ACGT})
+// naturally scores ~(a+3b)/4 under the expected-score model (still a penalty);
+// the option is retained for the legacy ungapped short-read path / validation.
+static void mm_gen_iupac_mat(int8_t *mat, int8_t a, int8_t b, int8_t transition, int8_t sc_ambi)
 {
-	assert(m == 5);
-	ksw_gen_simple_mat(m, mat, a, b, sc_ambi);
-	if (transition == 0 || transition == b) return;
-	transition = transition > 0? -transition : transition;
-	mat[0 * m + 2] = transition;  // A->G
-	mat[1 * m + 3] = transition;  // C->T
-	mat[2 * m + 0] = transition;  // G->A
-	mat[3 * m + 1] = transition;  // T->C
+	int x, y;
+	int A = a < 0? -a : a;          // |match|
+	int B = b > 0? -b : b;          // -|mismatch|
+	int TR = transition;
+	(void)sc_ambi;
+	if (TR == 0 || TR == b) TR = B; // upstream: transition inactive -> = mismatch
+	else TR = TR > 0? -TR : TR;     // -|transition|
+	for (x = 0; x < MM_ASIZE; ++x) {
+		int X = mm_seq_nt16_set[x];
+		for (y = 0; y < MM_ASIZE; ++y) {
+			int Y = mm_seq_nt16_set[y];
+			int i, j, sum = 0, cnt = 0, v;
+			for (i = 0; i < 4; ++i) if (X & (1<<i))
+				for (j = 0; j < 4; ++j) if (Y & (1<<j))
+					sum += mm_base_sc(i, j, A, B, TR), ++cnt;
+			// round half away from zero (cnt >= 1 always)
+			v = sum >= 0? (2*sum + cnt) / (2*cnt) : -((-2*sum + cnt) / (2*cnt));
+			if (v > 127) v = 127; else if (v < -128) v = -128;
+			mat[x * MM_ASIZE + y] = (int8_t)v;
+		}
+	}
 }
 
 static inline void mm_seq_rev(uint32_t len, uint8_t *seq)
@@ -69,7 +90,7 @@ static int mm_test_zdrop(void *km, const mm_mapopt_t *opt, const uint8_t *qseq, 
 		uint32_t l, op = cigar[k]&0xf, len = cigar[k]>>4;
 		if (op == MM_CIGAR_MATCH) {
 			for (l = 0; l < len; ++l) {
-				score += mat[tseq[i + l] * 5 + qseq[j + l]];
+				score += mat[tseq[i + l] * MM_ASIZE + qseq[j + l]];
 				update_max_zdrop(score, i+l, j+l, &max, &max_i, &max_j, opt->e, &max_zdrop, pos);
 			}
 			i += len, j += len;
@@ -90,9 +111,9 @@ static int mm_test_zdrop(void *km, const mm_mapopt_t *opt, const uint8_t *qseq, 
 		qseq2 = (uint8_t*)kmalloc(km, q_len);
 		for (i = 0; i < q_len; ++i) {
 			int c = qseq[pos[1][1] - i - 1];
-			qseq2[i] = c >= 4? 4 : 3 - c;
+			qseq2[i] = mm_comp_table[c];
 		}
-		qp = ksw_ll_qinit(km, 2, q_len, qseq2, 5, mat);
+		qp = ksw_ll_qinit(km, 2, q_len, qseq2, MM_ASIZE, mat);
 		score = ksw_ll_i16(qp, t_len, tseq + pos[0][0], opt->q, opt->e, &q_off, &t_off);
 		kfree(km, qseq2);
 		kfree(km, qp);
@@ -267,9 +288,15 @@ static void mm_update_extra(mm_reg1_t *r, const uint8_t *qseq, const uint8_t *ts
 			int n_ambi = 0, n_diff = 0;
 			for (l = 0; l < len; ++l) {
 				int cq = qseq[qoff + l], ct = tseq[toff + l];
-				if (ct > 3 || cq > 3) ++n_ambi;
-				else if (ct != cq) ++n_diff;
-				s += mat[ct * 5 + cq];
+				// N(4) / unknown(15) stay "ambiguous" (excluded from blen/mlen,
+				// counted in n_ambi) exactly as upstream. Pure ACGT keep the
+				// upstream exact-equality test. A real IUPAC code (5..14) on
+				// either side counts as a real (mis)match: compatible sets
+				// (overlap) -> match, disjoint -> mismatch.
+				if (ct == 4 || ct == 15 || cq == 4 || cq == 15) ++n_ambi;
+				else if (ct < 4 && cq < 4) { if (ct != cq) ++n_diff; }
+				else if (!mm_iupac_compat(ct, cq)) ++n_diff;
+				s += mat[ct * MM_ASIZE + cq];
 				if (s < 0) s = 0;
 				else max = max > s? max : s;
 			}
@@ -278,7 +305,7 @@ static void mm_update_extra(mm_reg1_t *r, const uint8_t *qseq, const uint8_t *ts
 		} else if (op == MM_CIGAR_INS) {
 			int n_ambi = 0;
 			for (l = 0; l < len; ++l)
-				if (qseq[qoff + l] > 3) ++n_ambi;
+				if (qseq[qoff + l] == 4 || qseq[qoff + l] == 15) ++n_ambi;
 			r->blen += len - n_ambi, p->n_ambi += n_ambi;
 			if (log_gap) s -= q + (double)e * mg_log2(1.0 + len);
 			else s -= q + e;
@@ -287,7 +314,7 @@ static void mm_update_extra(mm_reg1_t *r, const uint8_t *qseq, const uint8_t *ts
 		} else if (op == MM_CIGAR_DEL) {
 			int n_ambi = 0;
 			for (l = 0; l < len; ++l)
-				if (tseq[toff + l] > 3) ++n_ambi;
+				if (tseq[toff + l] == 4 || tseq[toff + l] == 15) ++n_ambi;
 			r->blen += len - n_ambi, p->n_ambi += n_ambi;
 			if (log_gap) s -= q + (double)e * mg_log2(1.0 + len);
 			else s -= q + e;
@@ -339,9 +366,9 @@ static void mm_align_pair(void *km, const mm_mapopt_t *opt, int qlen, const uint
 	if (mm_dbg_flag & MM_DBG_PRINT_ALN_SEQ) {
 		int i;
 		fprintf(stderr, "===> q=(%d,%d), e=(%d,%d), bw=%d, ksw_flag=%d, zdrop=%d, end_bonus=%d <===\n", opt->q, opt->q2, opt->e, opt->e2, w, ksw_flag, opt->zdrop, end_bonus);
-		for (i = 0; i < tlen; ++i) fputc("ACGTN"[tseq[i]], stderr);
+		for (i = 0; i < tlen; ++i) fputc(mm_seq_nt16_str[tseq[i]], stderr);
 		fputc('\n', stderr);
-		for (i = 0; i < qlen; ++i) fputc("ACGTN"[qseq[i]], stderr);
+		for (i = 0; i < qlen; ++i) fputc(mm_seq_nt16_str[qseq[i]], stderr);
 		fputc('\n', stderr);
 	}
 	if (opt->transition != 0 && opt->b != opt->transition)
@@ -352,11 +379,11 @@ static void mm_align_pair(void *km, const mm_mapopt_t *opt, int qlen, const uint
 	} else if (opt->flag & MM_F_SPLICE) { // spliced alignment
 		assert((ksw_flag & KSW_EZ_SPLICE_FOR) == 0 || (ksw_flag & KSW_EZ_SPLICE_REV) == 0);
 		if (!(opt->flag & MM_F_SPLICE_OLD)) ksw_flag |= KSW_EZ_SPLICE_CMPLX;
-		ksw_exts2_sse(km, qlen, qseq, tlen, tseq, 5, mat, opt->q, opt->e, opt->q2, opt->noncan, zdrop, end_bonus, opt->junc_bonus, opt->junc_pen, ksw_flag, junc, ez);
+		ksw_exts2_sse(km, qlen, qseq, tlen, tseq, MM_ASIZE, mat, opt->q, opt->e, opt->q2, opt->noncan, zdrop, end_bonus, opt->junc_bonus, opt->junc_pen, ksw_flag, junc, ez);
 	} else if (opt->q == opt->q2 && opt->e == opt->e2) { // affine gap
-		ksw_extz2_sse(km, qlen, qseq, tlen, tseq, 5, mat, opt->q, opt->e, w, zdrop, end_bonus, ksw_flag, ez);
+		ksw_extz2_sse(km, qlen, qseq, tlen, tseq, MM_ASIZE, mat, opt->q, opt->e, w, zdrop, end_bonus, ksw_flag, ez);
 	} else { // dual affine gap
-		ksw_extd2_sse(km, qlen, qseq, tlen, tseq, 5, mat, opt->q, opt->e, opt->q2, opt->e2, w, zdrop, end_bonus, ksw_flag, ez);
+		ksw_extd2_sse(km, qlen, qseq, tlen, tseq, MM_ASIZE, mat, opt->q, opt->e, opt->q2, opt->e2, w, zdrop, end_bonus, ksw_flag, ez);
 	}
 	if (mm_dbg_flag & MM_DBG_PRINT_ALN_SEQ) {
 		int i;
@@ -390,7 +417,7 @@ static int mm_align_sr_rna(void *km, const mm_mapopt_t *opt, int qlen, const uin
 		memcpy(&junc2[qlen + ilen], &junc[tlen - qlen], qlen);
 	}
 	if (!(opt->flag & MM_F_SPLICE_OLD)) ksw_flag |= KSW_EZ_SPLICE_CMPLX;
-	ksw_exts2_sse(km, qlen, qseq, tlen2, tseq2, 5, mat, opt->q, opt->e, opt->q2, opt->noncan, zdrop, end_bonus, opt->junc_bonus, opt->junc_pen, ksw_flag, junc2, ez);
+	ksw_exts2_sse(km, qlen, qseq, tlen2, tseq2, MM_ASIZE, mat, opt->q, opt->e, opt->q2, opt->noncan, zdrop, end_bonus, opt->junc_bonus, opt->junc_pen, ksw_flag, junc2, ez);
 	if (ez->zdropped) return 0;
 	if ((ez->cigar[0]&0xf) != KSW_CIGAR_MATCH || (ez->cigar[ez->n_cigar-1]&0xf) != KSW_CIGAR_MATCH) return 0;
 	for (i = 0; i < ez->n_cigar; ++i) { // count the number of introns in the alignment
@@ -588,7 +615,7 @@ static void mm_max_stretch(const mm_reg1_t *r, const mm128_t *a, int32_t *as, in
 	*as = max_i, *cnt = max_len;
 }
 
-static int mm_seed_ext_score(void *km, const mm_mapopt_t *opt, const mm_idx_t *mi, const int8_t mat[25], int qlen, uint8_t *qseq0[2], const mm128_t *a)
+static int mm_seed_ext_score(void *km, const mm_mapopt_t *opt, const mm_idx_t *mi, const int8_t *mat, int qlen, uint8_t *qseq0[2], const mm128_t *a)
 {
 	uint8_t *qseq, *tseq;
 	int q_span = a->y>>32&0xff, qs, qe, rs, re, rid, score, q_off, t_off, ext_len = opt->anchor_ext_len;
@@ -608,14 +635,14 @@ static int mm_seed_ext_score(void *km, const mm_mapopt_t *opt, const mm_idx_t *m
 		qseq = qseq0[a->x>>63] + qs;
 		mm_idx_getseq(mi, rid, rs, re, tseq);
 	}
-	qp = ksw_ll_qinit(km, 2, qe - qs, qseq, 5, mat);
+	qp = ksw_ll_qinit(km, 2, qe - qs, qseq, MM_ASIZE, mat);
 	score = ksw_ll_i16(qp, re - rs, tseq, opt->q, opt->e, &q_off, &t_off);
 	kfree(km, tseq);
 	kfree(km, qp);
 	return score;
 }
 
-static void mm_fix_bad_ends_splice(void *km, const mm_mapopt_t *opt, const mm_idx_t *mi, const mm_reg1_t *r, const int8_t mat[25], int qlen, uint8_t *qseq0[2], const mm128_t *a, int *as1, int *cnt1)
+static void mm_fix_bad_ends_splice(void *km, const mm_mapopt_t *opt, const mm_idx_t *mi, const mm_reg1_t *r, const int8_t *mat, int qlen, uint8_t *qseq0[2], const mm128_t *a, int *as1, int *cnt1)
 { // this assumes a very crude k-mer based mode; it is not necessary to use a good model just for filtering bounary exons
 	int score;
 	double log_gap;
@@ -650,13 +677,13 @@ static void mm_align1(void *km, const mm_mapopt_t *opt, const mm_idx_t *mi, int 
 	int32_t i, l, bw, bw_long, dropped = 0, ksw_flag = 0, rs0, re0, qs0, qe0;
 	int32_t rs, re, qs, qe;
 	int32_t rs1, qs1, re1, qe1;
-	int8_t mat[25];
+	int8_t mat[MM_ASIZE * MM_ASIZE];
 
 	if (is_sr) assert(!(mi->flag & MM_I_HPC)); // HPC won't work with SR because with HPC we can't easily tell if there is a gap
 
 	r2->cnt = 0;
 	if (r->cnt == 0) return;
-	ksw_gen_ts_mat(5, mat, opt->a, opt->b, opt->transition, opt->sc_ambi);
+	mm_gen_iupac_mat(mat, opt->a, opt->b, opt->transition, opt->sc_ambi);
 	bw = (int)(opt->bw * 1.5 + 1.);
 	bw_long = (int)(opt->bw_long * 1.5 + 1.);
 	if (bw_long < bw) bw_long = bw;
@@ -824,10 +851,8 @@ static void mm_align1(void *km, const mm_mapopt_t *opt, const mm_idx_t *mi, int 
 				int32_t max_gapped_score = (qe - qs - 2) * opt->a - 2 * (opt->q + opt->e);
 				assert(qe - qs == re - rs);
 				ksw_reset_extz(ez);
-				for (j = 0, ez->score = 0; j < qe - qs; ++j) {
-					if (qseq[j] >= 4 || tseq[j] >= 4) ez->score += opt->sc_ambi > 0? -opt->sc_ambi : opt->sc_ambi;
-					else ez->score += qseq[j] == tseq[j]? opt->a : -opt->b;
-				}
+				for (j = 0, ez->score = 0; j < qe - qs; ++j) // IUPAC-aware: same matrix as the gapped path
+					ez->score += mat[tseq[j] * MM_ASIZE + qseq[j]];
 				if (ez->score > max_gapped_score)
 					ez->cigar = ksw_push_cigar(km, &ez->n_cigar, &ez->m_cigar, ez->cigar, MM_CIGAR_MATCH, qe - qs);
 				else
@@ -917,7 +942,7 @@ static int mm_align1_inv(void *km, const mm_mapopt_t *opt, const mm_idx_t *mi, i
 { // NB: this doesn't work with the qstrand mode
 	int tl, ql, score, ret = 0, q_off, t_off;
 	uint8_t *tseq, *qseq;
-	int8_t mat[25];
+	int8_t mat[MM_ASIZE * MM_ASIZE];
 	void *qp;
 
 	memset(r_inv, 0, sizeof(mm_reg1_t));
@@ -930,14 +955,14 @@ static int mm_align1_inv(void *km, const mm_mapopt_t *opt, const mm_idx_t *mi, i
 	if (ql < opt->min_chain_score || ql > opt->max_gap) return 0;
 	if (tl < opt->min_chain_score || tl > opt->max_gap) return 0;
 
-	ksw_gen_ts_mat(5, mat, opt->a, opt->b, opt->transition, opt->sc_ambi);
+	mm_gen_iupac_mat(mat, opt->a, opt->b, opt->transition, opt->sc_ambi);
 	tseq = (uint8_t*)kmalloc(km, tl);
 	mm_idx_getseq(mi, r1->rid, r1->re, r2->rs, tseq);
 	qseq = r1->rev? &qseq0[0][r2->qe] : &qseq0[1][qlen - r2->qs];
 
 	mm_seq_rev(ql, qseq);
 	mm_seq_rev(tl, tseq);
-	qp = ksw_ll_qinit(km, 2, ql, qseq, 5, mat);
+	qp = ksw_ll_qinit(km, 2, ql, qseq, MM_ASIZE, mat);
 	score = ksw_ll_i16(qp, tl, tseq, opt->q, opt->e, &q_off, &t_off);
 	kfree(km, qp);
 	mm_seq_rev(ql, qseq);
@@ -1057,7 +1082,7 @@ mm_reg1_t *mm_align_skeleton(void *km, const mm_mapopt_t *opt, const mm_idx_t *m
 	qseq0[1] = qseq0[0] + qlen;
 	for (i = 0; i < qlen; ++i) {
 		qseq0[0][i] = seq_nt4_table[(uint8_t)qstr[i]];
-		qseq0[1][qlen - 1 - i] = qseq0[0][i] < 4? 3 - qseq0[0][i] : 4;
+		qseq0[1][qlen - 1 - i] = mm_comp_table[qseq0[0][i]];
 	}
 
 	// align through seed hits

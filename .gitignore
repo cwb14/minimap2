@@ -5,4 +5,7 @@
 *.o
 *.dSYM
 minimap2
+minimap2.upstream
 mappy.c
+__pycache__/
+*.pyc

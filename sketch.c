@@ -6,24 +6,58 @@
 #include "kvec.h"
 #include "mmpriv.h"
 
+// IUPAC-aware encoding (forked from upstream minimap2).
+// Symbols: 0=A 1=C 2=G 3=T  4=N  5=R 6=Y 7=S 8=W 9=K 10=M 11=B 12=D 13=H 14=V  15=? (unknown)
+// A,C,G,T keep upstream symbols 0..3 so every existing `c<4`/`c>=4` test is
+// unchanged; the only difference vs upstream is that non-ACGT no longer all
+// collapse to a single value but carry their IUPAC identity (4..15). Seeding
+// (mm_sketch) and sdust still treat 4..15 as a k-mer break exactly as before.
+// `seq_nt4_table` keeps its name so existing externs/translation units link
+// unchanged. Bytes 0..3 keep the legacy 0..3 mapping (never used for real
+// ASCII input, retained for byte-identical behavior).
 unsigned char seq_nt4_table[256] = {
-	0, 1, 2, 3,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,
-	4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,
-	4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,
-	4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,
-	4, 0, 4, 1,  4, 4, 4, 2,  4, 4, 4, 4,  4, 4, 4, 4,
-	4, 4, 4, 4,  3, 3, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,
-	4, 0, 4, 1,  4, 4, 4, 2,  4, 4, 4, 4,  4, 4, 4, 4,
-	4, 4, 4, 4,  3, 3, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,
-	4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,
-	4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,
-	4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,
-	4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,
-	4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,
-	4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,
-	4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,
-	4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4
+	 0,  1,  2,  3, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
+	15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
+	15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
+	15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
+	15,  0, 11,  1, 12, 15, 15,  2, 13, 15, 15,  9, 15, 10,  4, 15, // @ A B C D E F G H I J K L M N O
+	15, 15,  5,  7,  3,  3, 14,  8, 15,  6, 15, 15, 15, 15, 15, 15, // P Q R S T U V W X Y Z
+	15,  0, 11,  1, 12, 15, 15,  2, 13, 15, 15,  9, 15, 10,  4, 15, // ` a b c d e f g h i j k l m n o
+	15, 15,  5,  7,  3,  3, 14,  8, 15,  6, 15, 15, 15, 15, 15, 15, // p q r s t u v w x y z
+	15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
+	15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
+	15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
+	15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
+	15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
+	15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
+	15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
+	15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15
 };
+
+// IUPAC helper tables (see mmpriv.h for declarations / mm_iupac_compat()).
+// mm_seq_nt16_set: symbol -> 4-bit concrete-base set (A=1,C=2,G=4,T=8).
+// Used only to build the scoring matrix and for compatibility tests.
+unsigned char mm_seq_nt16_set[16] = {
+	1, 2, 4, 8,       // A C G T
+	15,               // N = ACGT
+	5, 10, 6, 9, 12, 3, // R(AG) Y(CT) S(CG) W(AT) K(GT) M(AC)
+	14, 13, 11, 7,    // B(CGT) D(AGT) H(ACT) V(ACG)
+	15                // ? (unknown) treated as ACGT (N-like)
+};
+
+// mm_comp_table: symbol -> complement symbol (A<->T, C<->G at the set level).
+unsigned char mm_comp_table[16] = {
+	3, 2, 1, 0,       // A->T C->G G->C T->A
+	4,                // N->N
+	6, 5, 7, 8, 10, 9,// R<->Y S->S W->W K<->M
+	14, 13, 12, 11,   // B<->V D<->H
+	15                // ?->?
+};
+
+// mm_seq_nt16_str / _lc: symbol -> display char (for MD/cs/ds decode).
+// 16 chars so symbols 5..15 no longer index past a 5-char "ACGTN" literal.
+const char mm_seq_nt16_str[17]    = "ACGTNRYSWKMBDHV?";
+const char mm_seq_nt16_str_lc[17] = "acgtnryswkmbdhv?";
 
 static inline uint64_t hash64(uint64_t key, uint64_t mask)
 {

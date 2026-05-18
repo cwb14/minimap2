@@ -132,7 +132,7 @@ static char *mappy_fetch_seq(const mm_idx_t *mi, const char *name, int st, int e
 	s = (char*)malloc(en - st + 1);
 	*len = mm_idx_getseq(mi, rid, st, en, (uint8_t*)s);
 	for (i = 0; i < *len; ++i)
-		s[i] = "ACGTN"[(uint8_t)s[i]];
+		s[i] = "ACGTNRYSWKMBDHV?"[(uint8_t)s[i]]; // IUPAC-aware: 16 symbols
 	s[*len] = 0;
 	return s;
 }

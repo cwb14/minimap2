@@ -34,6 +34,23 @@
 #define mm_seq4_set(s, i, c) ((s)[(i)>>3] |= (uint32_t)(c) << (((i)&7)<<2))
 #define mm_seq4_get(s, i)    ((s)[(i)>>3] >> (((i)&7)<<2) & 0xf)
 
+// IUPAC-aware encoding (forked). Tables defined in sketch.c.
+//   seq_nt4_table : char  -> symbol 0..15 (0=A 1=C 2=G 3=T 4=N 5=R..14=V 15=?)
+//   mm_seq_nt16_set : symbol -> 4-bit concrete-base set (A=1,C=2,G=4,T=8)
+//   mm_comp_table : symbol -> complement symbol
+//   mm_seq_nt16_str : symbol -> display char ("ACGTNRYSWKMBDHV?")
+extern unsigned char seq_nt4_table[256];
+extern unsigned char mm_seq_nt16_set[16];
+extern unsigned char mm_comp_table[16];
+extern const char mm_seq_nt16_str[17];
+extern const char mm_seq_nt16_str_lc[17];
+
+// Two symbols are IUPAC-compatible iff their concrete-base sets overlap.
+static inline int mm_iupac_compat(uint8_t x, uint8_t y)
+{
+	return (mm_seq_nt16_set[x] & mm_seq_nt16_set[y]) != 0;
+}
+
 #define MALLOC(type, len) ((type*)malloc((len) * sizeof(type)))
 #define CALLOC(type, len) ((type*)calloc((len), sizeof(type)))
 #define REALLOC(type, ptr, cnt) ((type*)realloc((ptr), (cnt) * sizeof(type)))

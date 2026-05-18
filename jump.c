@@ -36,12 +36,12 @@ static uint8_t *mm_jump_get_qseq_seq(void *km, int32_t qlen, const uint8_t *qseq
 		if (is_left)
 			for (i = qlen - 1; i >= qlen - ql0; --i) {
 				uint8_t c = seq_nt4_table[(uint8_t)qseq0[i]];
-				qseq[k++] = c >= 4? c : 3 - c;
+				qseq[k++] = mm_comp_table[c];
 			}
 		else
 			for (i = ql0 - 1; i >= 0; --i) {
 				uint8_t c = seq_nt4_table[(uint8_t)qseq0[i]];
-				qseq[k++] = c >= 4? c : 3 - c;
+				qseq[k++] = mm_comp_table[c];
 			}
 	}
 	return qseq;
