@@ -1,6 +1,6 @@
 #!/usr/bin/env k8
 
-var paftools_version = '2.30-r1287';
+var paftools_version = '2.31-r1302';
 
 /*****************************
  ***** Library functions *****
