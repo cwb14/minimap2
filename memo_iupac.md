@@ -18,9 +18,12 @@ left **bit-identical to upstream** (regression-safe).
 
 Locked design decisions (with the user):
 
-1. **Scoring** = expected substitution score over the degeneracy:
-   `s(x,y) = mean over i∈set(x), j∈set(y) of base(i,j)`. N (={ACGT})
-   stays penalised (~`(a+3b)/4`).
+1. **Scoring** (discovery-tuned; supersedes the initial expected-score
+   choice): a cell with ≥1 *real* IUPAC code (R Y S W K M B D H V) scores
+   **full match `|a|` if the base sets overlap, mismatch `-|b|` if
+   disjoint** — maximises recovery of IUPAC-dense TE copies. Pure ACGT
+   keeps the exact upstream score (transitions; byte-identical). N/`?`
+   keep the expected-score penalty (~`(a+3b)/4`; never a wildcard).
 2. **Seeding** = IUPAC-aware (added in a second commit, default-on). Real
    degeneracy codes (R Y S W K M B D H V) are projected to a canonical
    concrete base (lowest set bit, A<C<G<T) in `mm_sketch` so minimizers
@@ -99,23 +102,23 @@ done   # -> no diff in any mode
 On `Kmer2LTR_run.consensus.fa` (12,392 LTR consensus) vs
 `gen5400000_final.fasta`, `-x asm20`:
 
-| | stock | fork (aln-only) | fork (+IUPAC seeding) |
-|---|---|---|---|
-| consensus aligned | 7,676 | 7,458 | **7,803** |
-| mean de (all primaries) | 0.0238 | — | **0.0004** |
+| version | consensus aligned | mean de (all primaries) |
+|---|---|---|
+| stock minimap2 | 7,676 | 0.0238 |
+| fork v1 (aln-only) | 7,458 | — |
+| fork v2 (+IUPAC seed, expected-score) | 7,803 | 0.0004 |
+| **fork v3 (+IUPAC seed, compatible→match)** | **8,718** | **0.0005** |
 
-- **+351 high-confidence elements vs stock** that stock + the aln-only
-  fork both miss: median 393 bp, mapq 21, de 0.0027, **median 9.9% IUPAC
-  content** (vs 1.9% overall) — i.e. exactly the IUPAC-dense copies the
-  blind seeding couldn't anchor.
-- 224 "lost vs stock" are the same junk churn (median 225 bp, mapq 0,
-  de 0.04, 86 >5% div) — filtered out of any real soloLTR analysis.
-- Discovery is capped below the optimistic projection sim (8,205) because
-  the expected-score model honestly penalises degenerate columns (~ -1)
-  rather than assuming a lucky concrete guess (+2). To push discovery
-  further (at the cost of divergence-estimate conservatism) one could
-  switch real-IUPAC columns to "compatible → ~full match" scoring — a
-  one-function change in `mm_gen_iupac_mat`; not done (decision 1 stands).
+- **+1,045 alignments vs stock**; only **3 regressions vs stock**;
+  **0 regressions vs v2** (strict superset). Exceeds the optimistic
+  projection sim (8,205) because compatible→match scores R-vs-*either*
+  allele as a match (the sim guessed one allele and mismatched the other).
+- Mechanism confirmed: the recovered elements are the IUPAC-dense
+  consensus copies (the v2→v3 gain set had ~10% IUPAC content vs ~2%
+  overall) that the IUPAC-blind seeder could not anchor.
+- Trade-off (accepted): `de` from compatible-degenerate columns → ~0, so
+  divergence/age must not be read off these columns; discovery is the
+  priority here.
 
 ## Notes / caveats
 

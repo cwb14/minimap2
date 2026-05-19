@@ -23,14 +23,20 @@ static inline int mm_base_sc(int i, int j, int a, int b, int tr)
 	return b;
 }
 
-// IUPAC-aware substitution matrix (MM_ASIZE x MM_ASIZE).
-// Score(x,y) = expected base score, i.e. the mean of mm_base_sc over every
-// concrete base i in set(x) and j in set(y) (uniform degeneracy model),
-// rounded half away from zero. mat[0]=(A,A)=|a| is preserved as the global
-// max so ksw2's sc_mch_=mat[0] / score-range assumptions still hold.
-// `sc_ambi` (--score-N) no longer flat-penalises ambiguity here: N (={ACGT})
-// naturally scores ~(a+3b)/4 under the expected-score model (still a penalty);
-// the option is retained for the legacy ungapped short-read path / validation.
+// IUPAC-aware substitution matrix (MM_ASIZE x MM_ASIZE), discovery-tuned.
+// Per cell (x,y):
+//  - both pure ACGT (single-bit sets, symbols 0..3): exact upstream score
+//    via mm_base_sc (keeps transition handling; pure-ACGT input stays
+//    byte-identical to stock).
+//  - either side N(4) or ?(15) (genuine unknown): expected score over the
+//    degeneracy -> still penalised (N vs A ~ (a+3b)/4); never a wildcard.
+//  - otherwise >=1 real IUPAC code (5..14): COMPATIBLE -> full match |a|,
+//    INCOMPATIBLE -> mismatch -|b|. This is the discovery-maximising model:
+//    a degenerate consensus column whose set contains the genome base
+//    scores like a true match, so IUPAC-dense alignments survive the DP
+//    thresholds (recovers TE copies the IUPAC-blind tool drops). Disjoint
+//    sets still score as a mismatch, so it is not a free wildcard.
+// mat[0]=(A,A)=|a| stays the global max (ksw2 sc_mch_=mat[0] assumption).
 static void mm_gen_iupac_mat(int8_t *mat, int8_t a, int8_t b, int8_t transition, int8_t sc_ambi)
 {
 	int x, y;
@@ -42,14 +48,26 @@ static void mm_gen_iupac_mat(int8_t *mat, int8_t a, int8_t b, int8_t transition,
 	else TR = TR > 0? -TR : TR;     // -|transition|
 	for (x = 0; x < MM_ASIZE; ++x) {
 		int X = mm_seq_nt16_set[x];
+		int x_special = (x == 4 || x == 15);          // N / unknown
+		int x_single  = (X & (X - 1)) == 0;           // pure ACGT (one bit)
 		for (y = 0; y < MM_ASIZE; ++y) {
 			int Y = mm_seq_nt16_set[y];
-			int i, j, sum = 0, cnt = 0, v;
-			for (i = 0; i < 4; ++i) if (X & (1<<i))
-				for (j = 0; j < 4; ++j) if (Y & (1<<j))
-					sum += mm_base_sc(i, j, A, B, TR), ++cnt;
-			// round half away from zero (cnt >= 1 always)
-			v = sum >= 0? (2*sum + cnt) / (2*cnt) : -((-2*sum + cnt) / (2*cnt));
+			int y_special = (y == 4 || y == 15);
+			int y_single  = (Y & (Y - 1)) == 0;
+			int v;
+			if (x_special || y_special) {             // expected score (N penalised)
+				int i, j, sum = 0, cnt = 0;
+				for (i = 0; i < 4; ++i) if (X & (1<<i))
+					for (j = 0; j < 4; ++j) if (Y & (1<<j))
+						sum += mm_base_sc(i, j, A, B, TR), ++cnt;
+				v = sum >= 0? (2*sum + cnt) / (2*cnt) : -((-2*sum + cnt) / (2*cnt));
+			} else if (x_single && y_single) {        // pure ACGT: exact upstream
+				int i = X==1?0:X==2?1:X==4?2:3;
+				int j = Y==1?0:Y==2?1:Y==4?2:3;
+				v = mm_base_sc(i, j, A, B, TR);
+			} else {                                  // >=1 real IUPAC
+				v = (X & Y)? A : B;                   // compatible -> match
+			}
 			if (v > 127) v = 127; else if (v < -128) v = -128;
 			mat[x * MM_ASIZE + y] = (int8_t)v;
 		}
