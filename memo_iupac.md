@@ -21,8 +21,14 @@ Locked design decisions (with the user):
 1. **Scoring** = expected substitution score over the degeneracy:
    `s(x,y) = mean over i∈set(x), j∈set(y) of base(i,j)`. N (={ACGT})
    stays penalised (~`(a+3b)/4`).
-2. **Seeding** = unchanged (alignment-only fork). A degenerate base still
-   breaks the k-mer run exactly as upstream.
+2. **Seeding** = IUPAC-aware (added in a second commit, default-on). Real
+   degeneracy codes (R Y S W K M B D H V) are projected to a canonical
+   concrete base (lowest set bit, A<C<G<T) in `mm_sketch` so minimizers
+   span degenerate columns; N and `?` still break the k-mer run (genuine
+   unknown, not informative — never seed across assembly N-gaps). Pure
+   ACGT is untouched (0..3 map to themselves) so the byte-identical
+   regression guarantee holds. This is what actually recovers TE-copy
+   alignments the IUPAC-blind seeding drops.
 3. **Identity/NM/de** = a real-IUPAC column counts as a match (NM+0) iff
    the base sets overlap, else mismatch (NM+1); `N`/unknown keep upstream
    accounting (excluded from match/mismatch, counted in `nn:i:`/`n_ambi`).
@@ -38,7 +44,7 @@ Locked design decisions (with the user):
 
 | File | Change |
 |------|--------|
-| `sketch.c` | Extended single `seq_nt4_table` to 16 symbols (0-3 = ACGT unchanged; 4=N, 5..14 = R Y S W K M B D H V, 15=?). Added `mm_seq_nt16_set`, `mm_comp_table`, `mm_seq_nt16_str`/`_lc`. |
+| `sketch.c` | Extended single `seq_nt4_table` to 16 symbols (0-3 = ACGT unchanged; 4=N, 5..14 = R Y S W K M B D H V, 15=?). Added `mm_seq_nt16_set`, `mm_comp_table`, `mm_seq_nt16_str`/`_lc`. **IUPAC-aware seeding**: `mm_seq_nt4_proj[16]` projects real degeneracy → concrete base; `mm_sketch` uses it (N/? still break). |
 | `mmpriv.h` | Extern decls + `static inline mm_iupac_compat()`. |
 | `align.c` | `ksw_gen_*_mat` → `mm_gen_iupac_mat` (16×16 expected-score). All `mat[25]`→`[256]`, alphabet size `5`→`MM_ASIZE(16)` at every ksw call/profile. IUPAC revcomp via `mm_comp_table`. Identity/`n_ambi` stats: N/? excluded as upstream, real IUPAC = compat?match:mismatch. Ungapped SR path uses the matrix. |
 | `index.c` | `mm_idx_getseq_rev` reverse-complement → `mm_comp_table` (IUPAC-correct minus strand). Ref store now keeps 0..15 (4-bit packing unchanged). |
@@ -87,6 +93,29 @@ for m in "-c --cs=long --MD" "-a --cs --MD" "-c -x asm20"; do
        <(./minimap2          $m test/MT-human.fa test/MT-orang.fa | grep -v '^@PG')
 done   # -> no diff in any mode
 ```
+
+## IUPAC-aware seeding — real-data result
+
+On `Kmer2LTR_run.consensus.fa` (12,392 LTR consensus) vs
+`gen5400000_final.fasta`, `-x asm20`:
+
+| | stock | fork (aln-only) | fork (+IUPAC seeding) |
+|---|---|---|---|
+| consensus aligned | 7,676 | 7,458 | **7,803** |
+| mean de (all primaries) | 0.0238 | — | **0.0004** |
+
+- **+351 high-confidence elements vs stock** that stock + the aln-only
+  fork both miss: median 393 bp, mapq 21, de 0.0027, **median 9.9% IUPAC
+  content** (vs 1.9% overall) — i.e. exactly the IUPAC-dense copies the
+  blind seeding couldn't anchor.
+- 224 "lost vs stock" are the same junk churn (median 225 bp, mapq 0,
+  de 0.04, 86 >5% div) — filtered out of any real soloLTR analysis.
+- Discovery is capped below the optimistic projection sim (8,205) because
+  the expected-score model honestly penalises degenerate columns (~ -1)
+  rather than assuming a lucky concrete guess (+2). To push discovery
+  further (at the cost of divergence-estimate conservatism) one could
+  switch real-IUPAC columns to "compatible → ~full match" scoring — a
+  one-function change in `mm_gen_iupac_mat`; not done (decision 1 stands).
 
 ## Notes / caveats
 

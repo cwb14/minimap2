@@ -59,6 +59,30 @@ unsigned char mm_comp_table[16] = {
 const char mm_seq_nt16_str[17]    = "ACGTNRYSWKMBDHV?";
 const char mm_seq_nt16_str_lc[17] = "acgtnryswkmbdhv?";
 
+// IUPAC-aware seeding: project a degenerate symbol to a canonical concrete
+// base (lowest set bit, A<C<G<T) so minimizers can span degenerate columns
+// instead of the k-mer run resetting. Genuine "unknown" (N=4, ?=15) is NOT
+// projected -- it still breaks the run (value 4), so seeds never form across
+// assembly N-gaps. The IUPAC-aware DP then resolves the true bases between
+// anchors. Applied symmetrically to reference and query (both go through
+// mm_sketch). Pure ACGT is unaffected (0..3 map to themselves), so
+// non-degenerate input remains byte-identical to upstream.
+unsigned char mm_seq_nt4_proj[16] = {
+	0, 1, 2, 3,   // A C G T
+	4,            // N  -> break (unknown, not informative)
+	0,            // R = A|G -> A
+	1,            // Y = C|T -> C
+	1,            // S = C|G -> C
+	0,            // W = A|T -> A
+	2,            // K = G|T -> G
+	0,            // M = A|C -> A
+	1,            // B = C|G|T -> C
+	0,            // D = A|G|T -> A
+	0,            // H = A|C|T -> A
+	0,            // V = A|C|G -> A
+	4             // ? -> break (unknown)
+};
+
 static inline uint64_t hash64(uint64_t key, uint64_t mask)
 {
 	key = (~key + (key << 21)) & mask; // key = (key << 21) - key - 1;
@@ -121,15 +145,17 @@ void mm_sketch(void *km, const char *str, int len, int w, int k, uint32_t rid, i
 	kv_resize(mm128_t, km, *p, p->n + len/w);
 
 	for (i = l = buf_pos = min_pos = 0; i < len; ++i) {
-		int c = seq_nt4_table[(uint8_t)str[i]];
+		// IUPAC-aware seeding: project degenerate codes to a concrete base
+		// so k-mers span them; N/? still yield 4 and break the run.
+		int c = mm_seq_nt4_proj[seq_nt4_table[(uint8_t)str[i]]];
 		mm128_t info = { UINT64_MAX, UINT64_MAX };
 		if (c < 4) { // not an ambiguous base
 			int z;
 			if (is_hpc) {
 				int skip_len = 1;
-				if (i + 1 < len && seq_nt4_table[(uint8_t)str[i + 1]] == c) {
+				if (i + 1 < len && mm_seq_nt4_proj[seq_nt4_table[(uint8_t)str[i + 1]]] == c) {
 					for (skip_len = 2; i + skip_len < len; ++skip_len)
-						if (seq_nt4_table[(uint8_t)str[i + skip_len]] != c)
+						if (mm_seq_nt4_proj[seq_nt4_table[(uint8_t)str[i + skip_len]]] != c)
 							break;
 					i += skip_len - 1; // put $i at the end of the current homopolymer run
 				}

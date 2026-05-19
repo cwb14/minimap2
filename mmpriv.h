@@ -44,6 +44,7 @@ extern unsigned char mm_seq_nt16_set[16];
 extern unsigned char mm_comp_table[16];
 extern const char mm_seq_nt16_str[17];
 extern const char mm_seq_nt16_str_lc[17];
+extern unsigned char mm_seq_nt4_proj[16];   // IUPAC-aware seeding projection
 
 // Two symbols are IUPAC-compatible iff their concrete-base sets overlap.
 static inline int mm_iupac_compat(uint8_t x, uint8_t y)
