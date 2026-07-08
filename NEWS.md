@@ -1,3 +1,36 @@
+Release 2.31-r1302 (19 May 2026)
+--------------------------------
+
+Notable changes to minimap2:
+
+ * Bugfix: supplementary and secondary alignments were occasionally flagged
+   incorrectly.
+
+ * Bugfix: Smith-Waterman alignment for inversion alignment led to an
+   out-of-bound access in rare cases.
+
+Changes to paftools.js:
+
+ * New feature: new `sim2bed` subcommand to get a BED file from simulated
+   reads.
+
+ * New feature: new `badread2fa` subcommand to format reads simulated by
+   the Badread simulator.
+
+Change to the python binding:
+
+ * New feature: mappy optionally writes the `ds` tag.
+
+ * Bugfix: a use-after-free error (#1345)
+
+The two bugs in minimap2 had existed for years. They were caught by Jeremy Wang
+at UNC when he ported minimap2 to Rust. Due to the two bug fixes, this version
+occasionally produces alignment different from the last version.
+
+(2.31: 19 May 2026, r1302)
+
+
+
 Release 2.30-r1287 (15 June 2025)
 ---------------------------------
 
